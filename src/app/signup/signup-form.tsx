@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import Image from 'next/image';
 import Link from 'next/link';
@@ -31,7 +31,7 @@ export interface SignupPlanOption {
   name: string;
 }
 
-const signupSchema = z.object({
+const baseSignupSchema = z.object({
   firstName: z
     .string()
     .min(1, 'First name is required')
@@ -43,11 +43,12 @@ const signupSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
   company: z.string().optional(),
   // Widened from a fixed enum: the set of valid ids now comes from the
-  // server-fetched plan list, not a hardcoded literal union.
+  // server-fetched plan list, not a hardcoded literal union. Membership is
+  // enforced per-component below, where the passed ids are in scope.
   plan: z.string().min(1, 'Please select a plan'),
 });
 
-type SignupFormData = z.infer<typeof signupSchema>;
+type SignupFormData = z.infer<typeof baseSignupSchema>;
 
 export default function SignupForm({ plans }: { plans: SignupPlanOption[] }) {
   const searchParams = useSearchParams();
@@ -55,7 +56,19 @@ export default function SignupForm({ plans }: { plans: SignupPlanOption[] }) {
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
-  const planIds = plans.map((plan) => plan.id);
+  const planIds = useMemo(() => plans.map((plan) => plan.id), [plans]);
+
+  // The set of valid plan ids is only known at runtime (server-fetched
+  // prop), so the submitted plan's membership check is attached here rather
+  // than at module scope.
+  const signupSchema = useMemo(
+    () =>
+      baseSignupSchema.refine((data) => planIds.includes(data.plan), {
+        message: 'Please select a valid plan',
+        path: ['plan'],
+      }),
+    [planIds],
+  );
 
   // Get plan from URL parameter or default to 'standard'
   const planParam = searchParams.get('plan');
