@@ -4,6 +4,7 @@ import type { Metadata } from 'next';
 
 import { FAQ } from '@/components/sections/faq';
 import Pricing from '@/components/sections/pricing';
+import { fetchPlans } from '@/lib/plans';
 
 export const metadata: Metadata = {
   title: 'Pricing - Flexible Plans for Your Needs',
@@ -16,10 +17,12 @@ export const metadata: Metadata = {
   },
 };
 
-const page = () => {
+const page = async () => {
+  const { plans } = await fetchPlans();
+
   return (
     <>
-      <Pricing headerTag="h1" />
+      <Pricing headerTag="h1" plans={plans} />
       <FAQ />
     </>
   );
