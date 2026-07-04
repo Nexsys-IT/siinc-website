@@ -68,14 +68,17 @@ function isApiPlansPayload(value: unknown): value is { plans: ApiPlan[] } {
 
 /**
  * Fetch live plans from the SIINC front-end. Any failure (missing key,
- * network error, non-200, unexpected shape) resolves to the static
- * fallback rather than throwing, so callers can always render something.
+ * network error, non-200, unexpected shape, empty list) resolves to the
+ * static fallback rather than throwing, so callers can always render
+ * something.
  */
 export async function fetchPlans(): Promise<{
   plans: SiincPlan[];
   live: boolean;
 }> {
-  const fallback = { plans: FALLBACK_PLANS, live: false };
+  // Fresh array per call: callers may sort/splice result.plans without
+  // corrupting FALLBACK_PLANS for every later request in a long-lived server.
+  const fallback = { plans: [...FALLBACK_PLANS], live: false };
 
   try {
     const apiKey = process.env.PLANS_READ_KEY;
@@ -94,7 +97,9 @@ export async function fetchPlans(): Promise<{
     }
 
     const data: unknown = await response.json();
-    if (!isApiPlansPayload(data)) {
+    // The front-end always seeds plans and fails closed, so an empty list
+    // means something upstream is broken — treat it as a failure.
+    if (!isApiPlansPayload(data) || data.plans.length === 0) {
       return fallback;
     }
 

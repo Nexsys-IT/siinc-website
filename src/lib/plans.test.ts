@@ -135,6 +135,36 @@ describe('fetchPlans', () => {
     expect(result).toEqual({ plans: FALLBACK_PLANS, live: false });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('falls back on an empty plans payload', async () => {
+    vi.stubEnv('PLANS_READ_KEY', 'test-key');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ plans: [] })),
+    );
+
+    const result = await fetchPlans();
+
+    expect(result).toEqual({ plans: FALLBACK_PLANS, live: false });
+  });
+
+  it('returns a fresh fallback array that callers can mutate safely', async () => {
+    vi.stubEnv('PLANS_READ_KEY', '');
+    vi.stubGlobal('fetch', vi.fn());
+    const fallbackNames = ['Standard', 'Professional', 'Enterprise'];
+
+    const first = await fetchPlans();
+    first.plans.reverse();
+    first.plans.pop();
+
+    // FALLBACK_PLANS itself must be untouched by the caller's mutations.
+    expect(FALLBACK_PLANS.map((p) => p.name)).toEqual(fallbackNames);
+
+    // A later call must get a full, correctly ordered fallback list.
+    const second = await fetchPlans();
+    expect(second.plans.map((p) => p.name)).toEqual(fallbackNames);
+    expect(second.plans).not.toBe(first.plans);
+  });
 });
 
 describe('canonicalPlanName', () => {
