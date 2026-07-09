@@ -164,7 +164,7 @@ export default function RootLayout({
           id="hs-script-loader"
           async
           defer
-          src="//js-ap1.hs-scripts.com/442453532.js"
+          src="https://js-ap1.hs-scripts.com/442453532.js"
         />
         {/* ZoomInfo Tracking */}
         <script
