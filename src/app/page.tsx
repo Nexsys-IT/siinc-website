@@ -6,8 +6,11 @@ import Hero from '@/components/sections/hero';
 import Logos from '@/components/sections/logos';
 import Pricing from '@/components/sections/pricing';
 import Testimonials from '@/components/sections/testimonials';
+import { fetchPlans } from '@/lib/plans';
 
-export default function Home() {
+export default async function Home() {
+  const { plans } = await fetchPlans();
+
   return (
     <>
       <Hero />
@@ -16,7 +19,7 @@ export default function Home() {
       <Feature2 />
       <Feature3 />
       <Testimonials />
-      <Pricing />
+      <Pricing plans={plans} />
       <FAQ />
     </>
   );

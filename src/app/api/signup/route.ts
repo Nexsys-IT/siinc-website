@@ -2,10 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import axios from 'axios';
 
-import { getValidAccessToken, getTenantId, hasContactScope } from '@/lib/xero';
+import { fetchPlans, canonicalPlanName } from '@/lib/plans';
 
 // Server-side logger that always logs in production for Vercel
-function serverLog(level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>) {
+function serverLog(
+  level: 'info' | 'warn' | 'error',
+  message: string,
+  data?: Record<string, unknown>,
+) {
   const timestamp = new Date().toISOString();
   const logEntry = {
     timestamp,
@@ -27,7 +31,6 @@ function serverLog(level: 'info' | 'warn' | 'error', message: string, data?: Rec
 
 // Validate environment variables
 function validateEnvironment(): { valid: boolean; error?: string } {
-  // Only check SIINC_API_KEY - Xero credentials are now managed via OAuth
   const required = ['SIINC_API_KEY'];
 
   const missing = required.filter((key) => !process.env[key]);
@@ -67,181 +70,14 @@ function checkRateLimit(ip: string): boolean {
   return true;
 }
 
-// Search for existing contact in Xero by email
-async function searchXeroContact(
-  accessToken: string,
-  tenantId: string,
-  email: string,
-): Promise<string | null> {
-
-  const xeroApiUrl = `https://api.xero.com/api.xro/2.0/Contacts?where=EmailAddress="${encodeURIComponent(email)}"`;
-
-  try {
-    const response = await axios.get(xeroApiUrl, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'xero-tenant-id': tenantId,
-        Accept: 'application/json',
-      },
-      timeout: 30000,
-    });
-
-    // Check if any contacts were found
-    if (response.data.Contacts && response.data.Contacts.length > 0) {
-      const existingContact = response.data.Contacts[0];
-      serverLog('info', 'Found existing Xero contact', {
-        email,
-        contactId: existingContact.ContactID,
-      });
-      return existingContact.ContactID;
-    }
-
-    serverLog('info', 'No existing Xero contact found', { email });
-    return null;
-  } catch (error: unknown) {
-    const axiosError = error as {
-      response?: { status?: number; data?: { Message?: string; Detail?: string } };
-      message?: string;
-    };
-
-    serverLog('warn', 'Failed to search Xero contacts', {
-      email,
-      status: axiosError.response?.status,
-      responseData: axiosError.response?.data,
-      errorMessage: axiosError.message,
-    });
-
-    // Check if this is an authentication failure - don't proceed
-    if (
-      axiosError.response?.status === 403 &&
-      axiosError.response?.data?.Detail === 'AuthenticationUnsuccessful'
-    ) {
-      throw new Error('Xero authentication failed. Token may be invalid or expired. Please reconnect via admin panel.');
-    }
-
-    // For other errors, return null to proceed with creation attempt
-    return null;
-  }
-}
-
-// Create contact in Xero
-async function createXeroContact(
-  accessToken: string,
-  tenantId: string,
-  firstName: string,
-  lastName: string,
-  email: string,
-  company?: string,
-): Promise<string> {
-
-  const xeroApiUrl = 'https://api.xero.com/api.xro/2.0/Contacts';
-
-  try {
-    const contactData = {
-      Contacts: [
-        {
-          Name: company || `${firstName} ${lastName}`,
-          FirstName: firstName,
-          LastName: lastName,
-          EmailAddress: email,
-          ContactStatus: 'ACTIVE',
-          IsCustomer: true,
-          ContactPersons: [
-            {
-              FirstName: firstName,
-              LastName: lastName,
-              EmailAddress: email,
-              IncludeInEmails: true,
-            },
-          ],
-        },
-      ],
-    };
-
-    serverLog('info', 'Creating Xero contact', { email, company });
-
-    const response = await axios.post(xeroApiUrl, contactData, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'xero-tenant-id': tenantId,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      timeout: 30000,
-    });
-
-    const xeroContact = response.data.Contacts[0];
-    serverLog('info', 'Xero contact created successfully', {
-      email,
-      contactId: xeroContact.ContactID,
-    });
-    return xeroContact.ContactID;
-  } catch (error: unknown) {
-    const axiosError = error as {
-      response?: { status?: number; data?: { Message?: string; Detail?: string } };
-      message?: string;
-    };
-
-    serverLog('error', 'Failed to create Xero contact', {
-      email,
-      status: axiosError.response?.status,
-      responseData: axiosError.response?.data,
-      errorMessage: axiosError.message,
-    });
-
-    // Check for various Xero error scenarios
-    if (axiosError.response?.status === 400) {
-      const errorMessage = axiosError.response?.data?.Message || '';
-      if (
-        errorMessage.includes('already exists') ||
-        errorMessage.includes('duplicate') ||
-        errorMessage.includes('Email address is already in use')
-      ) {
-        serverLog('info', 'Contact already exists, will search for existing contact', { email });
-        throw new Error('Contact already exists in Xero');
-      }
-      throw new Error('Invalid contact data');
-    }
-
-    if (axiosError.response?.status === 401) {
-      throw new Error('Xero authentication failed');
-    }
-
-    if (axiosError.response?.status === 403) {
-      const xeroDetail = axiosError.response?.data?.Detail;
-
-      // Log the full Xero error for debugging
-      serverLog('error', 'Xero 403 Forbidden error', {
-        email,
-        xeroError: axiosError.response?.data,
-        xeroDetail,
-      });
-
-      // Check if this is an authentication failure (token invalid/expired)
-      if (xeroDetail === 'AuthenticationUnsuccessful') {
-        throw new Error('Xero authentication failed. Token may be invalid or expired. Please reconnect via admin panel.');
-      }
-
-      // Check if this is due to missing scopes
-      const hasScope = await hasContactScope();
-      if (!hasScope) {
-        throw new Error('Xero token missing required scope: accounting.contacts. Please reconnect via admin panel.');
-      }
-      throw new Error('Insufficient permissions to create Xero contact. Check Xero user role permissions.');
-    }
-
-    throw new Error('Failed to create Xero contact');
-  }
-}
-
-// Create user in SIINC backend
+// Create user in SIINC backend (the front-end owns third-party contact
+// creation; this call only provisions the SIINC account).
 async function createSIINCUser(
-  xeroId: string,
   firstName: string,
   lastName: string,
   email: string,
-  company?: string,
-  plan?: string,
+  company: string | undefined,
+  plan: string,
 ): Promise<void> {
   const siincApiKey = process.env.SIINC_API_KEY;
 
@@ -250,26 +86,18 @@ async function createSIINCUser(
     throw new Error('SIINC API key not configured');
   }
 
-  const siincApiUrl = 'https://app.siinc.io/api/client/';
+  const siincApiUrl = `${process.env.SIINC_APP_URL ?? 'https://app.siinc.io'}/api/client/`;
 
   try {
     const userData = {
-      xero_id: xeroId,
       name: company || `${firstName} ${lastName}`,
       first_name: firstName,
       last_name: lastName,
       email: email,
-      charge_rate: 0,
-      plan: plan || 'standard',
+      plan: plan,
     };
 
-    serverLog('info', 'Creating SIINC user', { email, xeroId, plan: plan || 'standard' });
-
-    // Create https agent to handle certificate issues with internal backend
-    const https = await import('https');
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: false,
-    });
+    serverLog('info', 'Creating SIINC user', { email, plan });
 
     const response = await axios.post(siincApiUrl, userData, {
       headers: {
@@ -278,14 +106,13 @@ async function createSIINCUser(
       },
       timeout: 30000,
       validateStatus: (status) => status === 200 || status === 201,
-      httpsAgent,
     });
 
     if (response.status !== 200 && response.status !== 201) {
       throw new Error(response.data?.message || 'Failed to create user');
     }
 
-    serverLog('info', 'SIINC user created successfully', { email, xeroId });
+    serverLog('info', 'SIINC user created successfully', { email });
   } catch (error: unknown) {
     const axiosError = error as {
       response?: { status?: number; data?: { message?: string } };
@@ -295,7 +122,6 @@ async function createSIINCUser(
 
     serverLog('error', 'Failed to create SIINC user', {
       email,
-      xeroId,
       status: axiosError.response?.status,
       responseData: axiosError.response?.data,
       errorMessage: axiosError.message,
@@ -322,7 +148,10 @@ async function sendWelcomeEmail(
     const postmarkToken = process.env.POSTMARK_SERVER_TOKEN;
 
     if (!postmarkToken || postmarkToken.includes('your-token-here')) {
-      serverLog('warn', 'Postmark not properly configured, skipping welcome email');
+      serverLog(
+        'warn',
+        'Postmark not properly configured, skipping welcome email',
+      );
       return;
     }
 
@@ -419,7 +248,10 @@ async function sendAdminNotification(
     const postmarkToken = process.env.POSTMARK_SERVER_TOKEN;
 
     if (!postmarkToken || postmarkToken.includes('your-token-here')) {
-      serverLog('warn', 'Postmark not properly configured, skipping admin notification');
+      serverLog(
+        'warn',
+        'Postmark not properly configured, skipping admin notification',
+      );
       return;
     }
 
@@ -478,7 +310,9 @@ Time: ${new Date().toISOString()}
     serverLog('info', 'Admin notification sent', { email });
   } catch (error) {
     const err = error as { message?: string };
-    serverLog('warn', 'Failed to send admin notification', { error: err.message });
+    serverLog('warn', 'Failed to send admin notification', {
+      error: err.message,
+    });
     // Don't throw - admin notification is not critical to account creation
   }
 }
@@ -519,7 +353,12 @@ export async function POST(request: NextRequest) {
 
     // Validate required fields
     if (!firstName || !lastName || !email) {
-      serverLog('warn', 'Missing required fields', { requestId, hasFirstName: !!firstName, hasLastName: !!lastName, hasEmail: !!email });
+      serverLog('warn', 'Missing required fields', {
+        requestId,
+        hasFirstName: !!firstName,
+        hasLastName: !!lastName,
+        hasEmail: !!email,
+      });
       return NextResponse.json(
         { error: 'Please fill in all required fields.' },
         { status: 400 },
@@ -548,57 +387,45 @@ export async function POST(request: NextRequest) {
       plan: plan || 'standard',
     };
 
-    serverLog('info', 'Processing signup', { requestId, email: sanitizedData.email, plan: sanitizedData.plan });
+    serverLog('info', 'Processing signup', {
+      requestId,
+      email: sanitizedData.email,
+      plan: sanitizedData.plan,
+    });
 
     try {
-      // Step 1: Get Xero access token (uses OAuth tokens with auto-refresh)
-      const accessToken = await getValidAccessToken();
+      // Resolve the submitted plan against the live plan list (front-end
+      // owns pricing truth; fetchPlans() never throws, it falls back to
+      // the static plan set on any failure).
+      const { plans } = await fetchPlans();
+      const canonicalPlan = canonicalPlanName(plan || 'standard', plans);
 
-      // Step 2: Get tenant ID from stored OAuth connection
-      const tenantId = await getTenantId();
-      if (!tenantId) {
-        serverLog('error', 'Xero tenant ID not found - Xero not connected', { requestId });
-        throw new Error('Xero not connected');
-      }
-
-      // Step 3: Check if contact already exists in Xero
-      let xeroId = await searchXeroContact(accessToken, tenantId, sanitizedData.email);
-
-      // Step 4: If no existing contact, create a new one
-      if (!xeroId) {
-        xeroId = await createXeroContact(
-          accessToken,
-          tenantId,
-          sanitizedData.firstName,
-          sanitizedData.lastName,
-          sanitizedData.email,
-          sanitizedData.company,
-        );
-      }
-
-      // Step 5: Create user in SIINC backend (including plan info)
+      // Create user in SIINC backend (the front-end owns third-party
+      // contact creation, so nothing else needs to happen here first)
       await createSIINCUser(
-        xeroId,
         sanitizedData.firstName,
         sanitizedData.lastName,
         sanitizedData.email,
         sanitizedData.company,
-        sanitizedData.plan,
+        canonicalPlan,
       );
 
-      // Step 5: Send welcome email (optional - don't fail if email service is down)
+      // Send welcome email (optional - don't fail if email service is down)
       await sendWelcomeEmail(sanitizedData.firstName, sanitizedData.email);
 
-      // Step 6: Send admin notification
+      // Send admin notification
       await sendAdminNotification(
         sanitizedData.firstName,
         sanitizedData.lastName,
         sanitizedData.email,
         sanitizedData.company,
-        sanitizedData.plan,
+        canonicalPlan,
       );
 
-      serverLog('info', 'Signup completed successfully', { requestId, email: sanitizedData.email, xeroId });
+      serverLog('info', 'Signup completed successfully', {
+        requestId,
+        email: sanitizedData.email,
+      });
 
       return NextResponse.json(
         {
@@ -619,45 +446,13 @@ export async function POST(request: NextRequest) {
       });
 
       // Handle specific error messages
-      if (
-        errorObj.message === 'User already exists' ||
-        errorObj.message === 'Contact already exists in Xero'
-      ) {
+      if (errorObj.message === 'User already exists') {
         return NextResponse.json(
           {
             error:
               'An account with this email already exists. Please try logging in.',
           },
           { status: 409 },
-        );
-      }
-
-      if (
-        errorObj.message === 'Xero authentication failed' ||
-        errorObj.message === 'Xero not connected' ||
-        errorObj.message?.includes('not connected') ||
-        errorObj.message?.includes('refresh failed') ||
-        errorObj.message?.includes('Token may be invalid or expired')
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              'Authentication service is temporarily unavailable. Please try again later.',
-          },
-          { status: 503 },
-        );
-      }
-
-      if (
-        errorObj.message?.includes('missing required scope') ||
-        errorObj.message === 'Insufficient permissions to create Xero contact'
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              'Service configuration error. Please contact support.',
-          },
-          { status: 503 },
         );
       }
 
