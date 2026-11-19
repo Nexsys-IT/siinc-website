@@ -1,0 +1,10 @@
+# Dependabot version updates. Every update PR targets dev, which is
+# promoted to the default branch through the normal release PR.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    target-branch: dev
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
